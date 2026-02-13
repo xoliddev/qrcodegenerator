@@ -1,0 +1,30 @@
+# Environment variables (TOKEN!)
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# Media (foydalanuvchi fayllari)
+media/*
+!media/.gitkeep
+
+# Data
+data/pages.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
