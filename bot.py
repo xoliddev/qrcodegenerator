@@ -54,6 +54,12 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
+
+# 🔒 Faqat shu adminlarga ruxsat
+ADMIN_IDS = [730841948, 7290906386]
+router.message.filter(F.from_user.id.in_(ADMIN_IDS))
+router.callback_query.filter(F.from_user.id.in_(ADMIN_IDS))
+
 dp.include_router(router)
 
 # ─── States ─────────────────────────────────────────────────
