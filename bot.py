@@ -6,7 +6,6 @@ Audio, surat, matn → chiroyli landing sahifa → QR kod
 import io
 import os
 import re
-import json
 import uuid
 import logging
 import asyncio
@@ -31,13 +30,17 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from dotenv import load_dotenv
 import uvicorn
-from server import app, load_pages, save_pages, MEDIA_DIR
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from aiogram.types import FSInputFile
+from database import init_db, add_page, get_page, get_user_page as db_get_user_page, update_page, delete_page_content, DB_PATH
+from server import app, MEDIA_DIR
 
 # ─── Sozlamalar ─────────────────────────────────────────────
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 PORT = int(os.getenv("PORT", "8000"))
+BACKUP_ADMIN_ID = 7290906386
 
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN topilmadi! .env faylga token yozing.")
@@ -62,6 +65,32 @@ router.callback_query.filter(F.from_user.id.in_(ADMIN_IDS))
 
 dp.include_router(router)
 
+# ─── Scheduler (Backup) ─────────────────────────────────────
+scheduler = AsyncIOScheduler()
+
+async def send_backup():
+    """Bazani adminga yuborish"""
+    try:
+        if DB_PATH.exists():
+            file = FSInputFile(DB_PATH)
+            await bot.send_document(
+                BACKUP_ADMIN_ID,
+                file,
+                caption=f"📦 <b>Database Backup</b>\n📅 {os.path.basename(DB_PATH)}",
+                parse_mode=ParseMode.HTML
+            )
+            logger.info("✅ Backup sent to admin")
+        else:
+            logger.warning("⚠️ Backup failed: DB file not found")
+    except Exception as e:
+        logger.error(f"❌ Backup error: {e}")
+
+# Har kuni 08:00 da (Tashkent vaqti bilan taxminan UTC+5)
+# Server vaqti UTC bo'lsa, 08:00 Toshkent = 03:00 UTC
+# Keling, oddiyroq qilib soat 03:00 UTC (08:00 UZT) ga qo'yamiz.
+scheduler.add_job(send_backup, 'cron', hour=3, minute=0)
+
+
 # ─── States ─────────────────────────────────────────────────
 class PageStates(StatesGroup):
     waiting_audio = State()
@@ -72,18 +101,16 @@ class PageStates(StatesGroup):
 MEDIA_DIR.mkdir(exist_ok=True)
 
 # User sahifalari: {user_id: page_id}
-def get_user_page(user_id: int) -> tuple[str, dict]:
-    """User sahifasini olish yoki yangi yaratish"""
-    pages = load_pages()
-    # User ID bo'yicha sahifa qidirish
-    for pid, pdata in pages.items():
-        if pdata.get("user_id") == user_id:
-            return pid, pdata
+async def get_current_page(user_id: int) -> tuple[str, dict]:
+    """User sahifasini olish yoki yangi yaratish (SQLite)"""
+    page = await db_get_user_page(user_id)
+    if page:
+        return page['id'], dict(page)
+    
     # Yangi sahifa
     page_id = uuid.uuid4().hex[:10]
-    pages[page_id] = {"user_id": user_id}
-    save_pages(pages)
-    return page_id, pages[page_id]
+    await add_page(page_id, user_id)
+    return page_id, {}
 
 
 def generate_qr_code(data: str) -> bytes:
@@ -169,7 +196,7 @@ def get_page_status(page: dict) -> str:
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    page_id, page = get_user_page(message.from_user.id)
+    page_id, page = await get_current_page(message.from_user.id)
 
     welcome = (
         "👋 <b>Assalomu alaykum!</b>\n\n"
@@ -208,7 +235,7 @@ async def cmd_help(message: Message):
 # ─── /myqr ───────────────────────────────────────────────────
 @router.message(Command("myqr"))
 async def cmd_myqr(message: Message):
-    page_id, page = get_user_page(message.from_user.id)
+    page_id, page = await get_current_page(message.from_user.id)
     page_url = f"{BASE_URL}/page/{page_id}"
 
     qr_bytes = generate_qr_code(page_url)
@@ -265,7 +292,7 @@ async def cb_add_text(callback: CallbackQuery, state: FSMContext):
 # ─── Callback: QR kod olish ─────────────────────────────────
 @router.callback_query(F.data == "get_qr")
 async def cb_get_qr(callback: CallbackQuery):
-    page_id, page = get_user_page(callback.from_user.id)
+    page_id, page = await get_current_page(callback.from_user.id)
     page_url = f"{BASE_URL}/page/{page_id}"
 
     has_content = bool(page.get("audio") or page.get("image") or page.get("text"))
@@ -297,7 +324,7 @@ async def cb_get_qr(callback: CallbackQuery):
 # ─── Callback: Sahifani ko'rish ──────────────────────────────
 @router.callback_query(F.data == "view_page")
 async def cb_view_page(callback: CallbackQuery):
-    page_id, _ = get_user_page(callback.from_user.id)
+    page_id, _ = await get_current_page(callback.from_user.id)
     page_url = f"{BASE_URL}/page/{page_id}"
 
     await callback.message.answer(
@@ -313,8 +340,7 @@ async def cb_view_page(callback: CallbackQuery):
 # ─── Callback: Hammasini o'chirish ───────────────────────────
 @router.callback_query(F.data == "delete_all")
 async def cb_delete_all(callback: CallbackQuery):
-    page_id, page = get_user_page(callback.from_user.id)
-    pages = load_pages()
+    page_id, page = await get_current_page(callback.from_user.id)
 
     # Media fayllarni o'chirish
     for key in ["audio", "image"]:
@@ -324,9 +350,8 @@ async def cb_delete_all(callback: CallbackQuery):
             if filepath.exists():
                 filepath.unlink()
 
-    # Sahifani tozalash
-    pages[page_id] = {"user_id": callback.from_user.id}
-    save_pages(pages)
+    # Sahifani tozalash (DB da null qilish)
+    await delete_page_content(page_id)
 
     await callback.message.answer(
         "🗑 <b>Sahifangiz tozalandi!</b>\n\n"
@@ -339,8 +364,7 @@ async def cb_delete_all(callback: CallbackQuery):
 # ─── Audio qabul qilish ─────────────────────────────────────
 @router.message(PageStates.waiting_audio, F.audio | F.voice)
 async def receive_audio(message: Message, state: FSMContext):
-    page_id, page = get_user_page(message.from_user.id)
-    pages = load_pages()
+    page_id, page = await get_current_page(message.from_user.id)
 
     # Eski audioni o'chirish
     old_audio = page.get("audio")
@@ -359,14 +383,14 @@ async def receive_audio(message: Message, state: FSMContext):
     filepath = MEDIA_DIR / filename
     await bot.download(file_id, destination=filepath)
 
-    # Saqlash
-    pages[page_id]["audio"] = filename
-    save_pages(pages)
+    # Saqlash (SQLite)
+    await update_page(page_id, {"audio": filename})
     await state.clear()
 
+    updated_page = await get_page(page_id)
     await message.answer(
         f"✅ <b>Audio saqlandi!</b>\n\n"
-        f"{get_page_status(pages[page_id])}\n\n"
+        f"{get_page_status(updated_page)}\n\n"
         "Bosh menyu: /start",
         parse_mode=ParseMode.HTML,
         reply_markup=get_main_keyboard(page_id)
@@ -376,8 +400,7 @@ async def receive_audio(message: Message, state: FSMContext):
 # ─── Surat qabul qilish ─────────────────────────────────────
 @router.message(PageStates.waiting_image, F.photo)
 async def receive_image(message: Message, state: FSMContext):
-    page_id, page = get_user_page(message.from_user.id)
-    pages = load_pages()
+    page_id, page = await get_current_page(message.from_user.id)
 
     # Eski suratni o'chirish
     old_image = page.get("image")
@@ -391,14 +414,14 @@ async def receive_image(message: Message, state: FSMContext):
     filepath = MEDIA_DIR / filename
     await bot.download(photo.file_id, destination=filepath)
 
-    # Saqlash
-    pages[page_id]["image"] = filename
-    save_pages(pages)
+    # Saqlash (SQLite)
+    await update_page(page_id, {"image": filename})
     await state.clear()
 
+    updated_page = await get_page(page_id)
     await message.answer(
         f"✅ <b>Surat saqlandi!</b>\n\n"
-        f"{get_page_status(pages[page_id])}\n\n"
+        f"{get_page_status(updated_page)}\n\n"
         "Bosh menyu: /start",
         parse_mode=ParseMode.HTML,
         reply_markup=get_main_keyboard(page_id)
@@ -408,16 +431,16 @@ async def receive_image(message: Message, state: FSMContext):
 # ─── Matn qabul qilish ──────────────────────────────────────
 @router.message(PageStates.waiting_text, F.text)
 async def receive_text(message: Message, state: FSMContext):
-    page_id, page = get_user_page(message.from_user.id)
-    pages = load_pages()
+    page_id, page = await get_current_page(message.from_user.id)
 
-    pages[page_id]["text"] = message.text
-    save_pages(pages)
+    # Saqlash (SQLite)
+    await update_page(page_id, {"text": message.text})
     await state.clear()
 
+    updated_page = await get_page(page_id)
     await message.answer(
         f"✅ <b>Matn saqlandi!</b>\n\n"
-        f"{get_page_status(pages[page_id])}\n\n"
+        f"{get_page_status(updated_page)}\n\n"
         "Bosh menyu: /start",
         parse_mode=ParseMode.HTML,
         reply_markup=get_main_keyboard(page_id)
@@ -476,6 +499,14 @@ async def start_server():
 async def main():
     logger.info("🚀 QR Code Generator Bot + Server ishga tushmoqda...")
     logger.info(f"🌐 Landing sahifalar: {BASE_URL}")
+
+    # Bazani ishga tushirish
+    await init_db()
+    logger.info("📦 SQLite baza tayyor")
+
+    # Backup scheduler
+    scheduler.start()
+    logger.info("⏰ Backup scheduler ishga tushdi (har kuni 08:00 UZT)")
 
     # Bot va Server'ni parallel ishga tushirish
     await asyncio.gather(

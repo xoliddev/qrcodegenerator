@@ -3,7 +3,6 @@
 Bot bilan birga ishlaydi (bot.py dan import qilinadi)
 """
 
-import json
 import os
 from pathlib import Path
 
@@ -12,15 +11,14 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from database import get_page
+
 # ─── Yo'llar ────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
-DATA_DIR = BASE_DIR / "data"
 MEDIA_DIR = BASE_DIR / "media"
 TEMPLATES_DIR = BASE_DIR / "templates"
-PAGES_FILE = DATA_DIR / "pages.json"
 
 # Papkalar yaratish
-DATA_DIR.mkdir(exist_ok=True)
 MEDIA_DIR.mkdir(exist_ok=True)
 
 # ─── FastAPI ─────────────────────────────────────────────────
@@ -31,31 +29,13 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 app.mount("/media", StaticFiles(directory=str(MEDIA_DIR)), name="media")
 
 
-# ─── Yordamchi funksiyalar ──────────────────────────────────
-def load_pages() -> dict:
-    """pages.json dan barcha sahifalarni yuklash"""
-    if not PAGES_FILE.exists():
-        return {}
-    try:
-        with open(PAGES_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, FileNotFoundError):
-        return {}
-
-
-def save_pages(pages: dict):
-    """Sahifalarni pages.json ga saqlash"""
-    with open(PAGES_FILE, "w", encoding="utf-8") as f:
-        json.dump(pages, f, ensure_ascii=False, indent=2)
-
-
 # ─── Landing sahifa ─────────────────────────────────────────
 @app.get("/page/{page_id}", response_class=HTMLResponse)
 async def landing_page(request: Request, page_id: str):
     """Sahifani ko'rsatish"""
-    pages = load_pages()
-    page = pages.get(page_id, {})
-
+    page = await get_page(page_id)
+    
+    # Agar sahifa topilmasa, bo'sh dict qaytadi
     has_content = bool(page.get("audio") or page.get("image") or page.get("text"))
 
     # Media URL'lar
