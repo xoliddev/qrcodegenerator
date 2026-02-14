@@ -87,8 +87,24 @@ async def send_backup():
 
 # Har kuni 08:00 da (Tashkent vaqti bilan taxminan UTC+5)
 # Server vaqti UTC bo'lsa, 08:00 Toshkent = 03:00 UTC
-# Keling, oddiyroq qilib soat 03:00 UTC (08:00 UZT) ga qo'yamiz.
 scheduler.add_job(send_backup, 'cron', hour=3, minute=0)
+
+
+# ─── Keep-Alive (Koyeb uxlab qolmasligi uchun) ──────────────
+async def keep_alive():
+    """O'ziga o'zi ping yuboradi — server uxlab qolmasligi uchun"""
+    import urllib.request
+    try:
+        url = f"{BASE_URL}/health"
+        await asyncio.get_event_loop().run_in_executor(
+            None, urllib.request.urlopen, url
+        )
+        logger.debug("💓 Keep-alive ping sent")
+    except Exception:
+        pass  # Xato bo'lsa ham davom etamiz
+
+# Har 4 daqiqada ping
+scheduler.add_job(keep_alive, 'interval', minutes=4)
 
 
 # ─── States ─────────────────────────────────────────────────
